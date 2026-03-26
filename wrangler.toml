@@ -1,0 +1,23 @@
+name = "echo-social-media"
+main = "src/index.ts"
+compatibility_date = "2024-12-01"
+
+[triggers]
+crons = ["*/5 * * * *"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "echo-social-media"
+database_id = "5f3544d4-3427-49fd-b3c4-29be444ebaee"
+
+[[kv_namespaces]]
+binding = "CACHE"
+id = "685fcc8048854ddf87098176674df26a"
+
+[[services]]
+binding = "ENGINE_RUNTIME"
+service = "echo-engine-runtime"
+
+[[services]]
+binding = "SHARED_BRAIN"
+service = "echo-shared-brain"
