@@ -366,6 +366,18 @@ app.post('/ai/analyze-performance', async (c) => {
   return c.json(await resp.json().catch(() => ({ error: 'AI analysis failed' })));
 });
 
+app.onError((err, c) => {
+  if (err.message?.includes('JSON')) {
+    return c.json({ error: 'Invalid JSON body' }, 400);
+  }
+  console.error(`[echo-social-media] ${err.message}`);
+  return c.json({ error: 'Internal server error' }, 500);
+});
+
+app.notFound((c) => {
+  return c.json({ error: 'Not found' }, 404);
+});
+
 // ── Scheduled handler ──
 export default {
   fetch: app.fetch,
