@@ -75,7 +75,7 @@ app.use('*', async (c, next) => {
 });
 
 // ── Health ──
-app.get('/', (c) => c.redirect('/health'));
+app.get('/', (c) => c.json({ service: 'echo-social-media', version: '1.0.0', status: 'operational' }));
 app.get('/health', (c) => c.json({ ok: true, service: 'echo-social-media', version: '1.0.0', timestamp: new Date().toISOString() }));
 app.get('/status', async (c) => {
   try {
