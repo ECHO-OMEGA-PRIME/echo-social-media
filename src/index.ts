@@ -58,6 +58,7 @@ app.use('*', async (c, next) => {
 });
 
 // ── Health ──
+app.get('/', (c) => c.redirect('/health'));
 app.get('/health', (c) => c.json({ ok: true, service: 'echo-social-media', version: '1.0.0', timestamp: new Date().toISOString() }));
 app.get('/status', async (c) => {
   const accounts = await c.env.DB.prepare('SELECT COUNT(*) as c FROM social_accounts').first<{c:number}>();
