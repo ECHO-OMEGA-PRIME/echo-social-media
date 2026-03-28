@@ -585,15 +585,23 @@ app.notFound((c) => {
 export default {
   fetch: app.fetch,
   async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext) {
-    // Auto-publish scheduled posts that are due
-    const duePosts = await env.DB.prepare('SELECT id,account_id FROM posts WHERE status=\'scheduled\' AND scheduled_at <= datetime(\'now\') LIMIT 20').all();
-    for (const post of duePosts.results as any[]) {
-      const extId = `ext-${crypto.randomUUID().slice(0, 8)}`;
-      await env.DB.prepare('UPDATE posts SET status=\'published\', published_at=datetime(\'now\'), external_post_id=?, updated_at=datetime(\'now\') WHERE id=?').bind(extId, post.id).run();
-      await env.DB.prepare('UPDATE social_accounts SET post_count=post_count+1 WHERE id=?').bind(post.account_id).run();
-    }
+    try {
+      // Auto-publish scheduled posts that are due
+      const duePosts = await env.DB.prepare('SELECT id,account_id FROM posts WHERE status=\'scheduled\' AND scheduled_at <= datetime(\'now\') LIMIT 20').all();
+      for (const post of duePosts.results as any[]) {
+        try {
+          const extId = `ext-${crypto.randomUUID().slice(0, 8)}`;
+          await env.DB.prepare('UPDATE posts SET status=\'published\', published_at=datetime(\'now\'), external_post_id=?, updated_at=datetime(\'now\') WHERE id=?').bind(extId, post.id).run();
+          await env.DB.prepare('UPDATE social_accounts SET post_count=post_count+1 WHERE id=?').bind(post.account_id).run();
+        } catch (e: any) {
+          console.error(JSON.stringify({ ts: new Date().toISOString(), level: 'error', message: `Failed to publish post ${post.id}`, error: e?.message }));
+        }
+      }
 
-    // Cleanup old activity logs
-    await env.DB.prepare('DELETE FROM activity_log WHERE created_at < datetime(\'now\',\'-90 days\')').run();
+      // Cleanup old activity logs
+      await env.DB.prepare('DELETE FROM activity_log WHERE created_at < datetime(\'now\',\'-90 days\')').run();
+    } catch (e: any) {
+      console.error(JSON.stringify({ ts: new Date().toISOString(), level: 'error', message: 'Scheduled handler failed', error: e?.message }));
+    }
   },
 };
