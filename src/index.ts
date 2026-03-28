@@ -7,6 +7,9 @@ type Env = {
   ECHO_API_KEY: string;
   ENGINE_RUNTIME: Fetcher;
   SHARED_BRAIN: Fetcher;
+  STRIPE_SECRET_KEY?: string;
+  STRIPE_WEBHOOK_SECRET?: string;
+  ANALYTICS: AnalyticsEngineDataset;
 };
 
 const app = new Hono<{ Bindings: Env }>();
@@ -55,19 +58,19 @@ async function rateLimit(kv: KVNamespace, key: string, limit: number, windowSec 
 // CORS
 app.use('*', cors());
 
-// Auth
+// Auth — exempt webhooks and public endpoints
 app.use('*', async (c, next) => {
   const path = new URL(c.req.url).pathname;
-  if (path === '/health' || path === '/status' || c.req.method === 'GET') return next();
+  if (path === '/health' || path === '/status' || path === '/webhooks/stripe' || path === '/plans' || c.req.method === 'GET') return next();
   const key = c.req.header('X-Echo-API-Key') || c.req.header('Authorization')?.replace('Bearer ', '');
   if (!key || key !== c.env.ECHO_API_KEY) return c.json({ error: 'Unauthorized' }, 401);
   return next();
 });
 
-// Rate limiting
+// Rate limiting — exempt webhooks
 app.use('*', async (c, next) => {
   const path = new URL(c.req.url).pathname;
-  if (path === '/health' || path === '/status') return next();
+  if (path === '/health' || path === '/status' || path === '/webhooks/stripe') return next();
   const tenant = c.req.header('X-Tenant-ID') || c.req.query('tenant_id') || 'default';
   const limit = c.req.method === 'GET' ? 200 : 60;
   if (!(await rateLimit(c.env.CACHE, `${tenant}:${c.req.method}`, limit))) return c.json({ error: 'Rate limited' }, 429);
@@ -75,8 +78,8 @@ app.use('*', async (c, next) => {
 });
 
 // ── Health ──
-app.get('/', (c) => c.json({ service: 'echo-social-media', version: '1.0.0', status: 'operational' }));
-app.get('/health', (c) => c.json({ ok: true, service: 'echo-social-media', version: '1.0.0', timestamp: new Date().toISOString() }));
+app.get('/', (c) => c.json({ service: 'echo-social-media', version: '2.0.0', status: 'operational' }));
+app.get('/health', (c) => c.json({ ok: true, service: 'echo-social-media', version: '2.0.0', stripe: !!c.env.STRIPE_SECRET_KEY, timestamp: new Date().toISOString() }));
 app.get('/status', async (c) => {
   try {
     const accounts = await c.env.DB.prepare('SELECT COUNT(*) as c FROM social_accounts').first<{c:number}>();
