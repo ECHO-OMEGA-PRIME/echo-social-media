@@ -572,11 +572,146 @@ app.post('/ai/analyze-performance', async (c) => {
   }
 });
 
+// ═══════════════════════════════════════════════════════════════════════════
+// STRIPE PAYMENT INTEGRATION
+// ═══════════════════════════════════════════════════════════════════════════
+
+const SOCIAL_PLANS = [
+  { id: 'free', name: 'Free', price: 0, max_accounts: 2, max_posts_month: 30, max_scheduled: 5, display: 'Free' },
+  { id: 'pro', name: 'Pro', price: 2999, max_accounts: 10, max_posts_month: 500, max_scheduled: 100, display: '$29.99/mo' },
+  { id: 'agency', name: 'Agency', price: 9999, max_accounts: 50, max_posts_month: 5000, max_scheduled: 1000, display: '$99.99/mo' },
+  { id: 'enterprise', name: 'Enterprise', price: 29999, max_accounts: -1, max_posts_month: -1, max_scheduled: -1, display: '$299.99/mo' },
+] as const;
+
+async function verifyStripeSignature(payload: string, sigHeader: string, secret: string): Promise<boolean> {
+  const parts: Record<string, string> = {};
+  for (const p of sigHeader.split(',')) {
+    const eq = p.indexOf('=');
+    if (eq > 0) parts[p.slice(0, eq).trim()] = p.slice(eq + 1).trim();
+  }
+  const ts = parts['t'];
+  const v1 = parts['v1'];
+  if (!ts || !v1) return false;
+  if (Math.abs(Date.now() / 1000 - parseInt(ts)) > 300) return false;
+  const key = await crypto.subtle.importKey(
+    'raw', new TextEncoder().encode(secret),
+    { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']
+  );
+  const sig = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(`${ts}.${payload}`));
+  const expected = Array.from(new Uint8Array(sig)).map(b => b.toString(16).padStart(2, '0')).join('');
+  if (expected.length !== v1.length) return false;
+  let diff = 0;
+  for (let i = 0; i < expected.length; i++) diff |= expected.charCodeAt(i) ^ v1.charCodeAt(i);
+  return diff === 0;
+}
+
+// --- Stripe Webhook ---
+app.post('/webhooks/stripe', async (c) => {
+  const secret = c.env.STRIPE_WEBHOOK_SECRET;
+  if (!secret) return c.json({ error: 'Stripe not configured' }, 503);
+
+  const body = await c.req.text();
+  const sig = c.req.header('Stripe-Signature') || '';
+  if (!await verifyStripeSignature(body, sig, secret)) {
+    return c.json({ error: 'Invalid signature' }, 401);
+  }
+
+  const event = JSON.parse(body);
+
+  if (event.type === 'checkout.session.completed') {
+    const session = event.data.object;
+    const tenantId = session.metadata?.tenant_id;
+    const planId = session.metadata?.plan;
+    if (tenantId && planId) {
+      const plan = SOCIAL_PLANS.find(p => p.id === planId);
+      if (plan) {
+        await c.env.DB.prepare(
+          `UPDATE tenants SET plan=?1, max_accounts=?2, stripe_customer_id=?3, stripe_subscription_id=?4, updated_at=datetime('now') WHERE id=?5`
+        ).bind(planId, plan.max_accounts, session.customer, session.subscription, tenantId).run();
+      }
+    }
+  } else if (event.type === 'customer.subscription.deleted') {
+    const sub = event.data.object;
+    const free = SOCIAL_PLANS[0];
+    await c.env.DB.prepare(
+      `UPDATE tenants SET plan='free', max_accounts=?1, stripe_subscription_id=NULL, updated_at=datetime('now') WHERE stripe_subscription_id=?2`
+    ).bind(free.max_accounts, sub.id).run();
+  }
+
+  try {
+    c.env.ANALYTICS?.writeDataPoint({
+      blobs: ['stripe_webhook', event.type, ''],
+      doubles: [(event.data?.object?.amount_total || 0) / 100],
+      indexes: ['echo-social-media'],
+    });
+  } catch (_) {}
+
+  return c.json({ received: true });
+});
+
+// --- Plans ---
+app.get('/plans', (c) => c.json({ ok: true, data: SOCIAL_PLANS }));
+
+app.post('/plans/upgrade', async (c) => {
+  const stripeKey = c.env.STRIPE_SECRET_KEY;
+  if (!stripeKey) return c.json({ error: 'Payments not configured' }, 503);
+
+  const { tenant_id, plan, success_url, cancel_url } = await c.req.json() as any;
+  if (!tenant_id || !plan) return c.json({ error: 'tenant_id and plan required' }, 400);
+
+  const target = SOCIAL_PLANS.find(p => p.id === plan);
+  if (!target || target.price === 0) return c.json({ error: 'Invalid plan' }, 400);
+
+  const tenant = await c.env.DB.prepare('SELECT * FROM tenants WHERE id=?1').bind(tenant_id).first<any>();
+  if (!tenant) return c.json({ error: 'Tenant not found' }, 404);
+
+  const params = new URLSearchParams();
+  params.append('mode', 'subscription');
+  params.append('payment_method_types[0]', 'card');
+  params.append('line_items[0][price_data][currency]', 'usd');
+  params.append('line_items[0][price_data][product_data][name]', `Echo Social Media — ${target.name}`);
+  params.append('line_items[0][price_data][unit_amount]', String(target.price));
+  params.append('line_items[0][price_data][recurring][interval]', 'month');
+  params.append('line_items[0][quantity]', '1');
+  params.append('success_url', success_url || 'https://echo-prime-tech.com/social-media?upgraded=true');
+  params.append('cancel_url', cancel_url || 'https://echo-prime-tech.com/social-media/pricing');
+  params.append('metadata[tenant_id]', tenant_id);
+  params.append('metadata[plan]', plan);
+
+  const resp = await fetch('https://api.stripe.com/v1/checkout/sessions', {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${stripeKey}`, 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: params.toString(),
+  });
+
+  if (!resp.ok) return c.json({ error: 'Payment service error' }, 502);
+  const session = await resp.json() as any;
+  return c.json({ ok: true, checkout_url: session.url, session_id: session.id });
+});
+
+// --- Stripe Migration ---
+app.post('/admin/migrate-stripe', async (c) => {
+  const key = c.req.header('X-Echo-API-Key') || c.req.header('Authorization')?.replace('Bearer ', '');
+  if (!key || key !== c.env.ECHO_API_KEY) return c.json({ error: 'Unauthorized' }, 401);
+  try {
+    await c.env.DB.batch([
+      c.env.DB.prepare("ALTER TABLE tenants ADD COLUMN stripe_customer_id TEXT"),
+      c.env.DB.prepare("ALTER TABLE tenants ADD COLUMN stripe_subscription_id TEXT"),
+      c.env.DB.prepare("ALTER TABLE tenants ADD COLUMN plan_expires_at TEXT"),
+    ]);
+    return c.json({ ok: true, message: 'Stripe columns added' });
+  } catch (e: any) {
+    return c.json({ ok: true, message: 'Columns may already exist', detail: e.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+
 app.onError((err, c) => {
   if (err.message?.includes('JSON')) {
     return c.json({ error: 'Invalid JSON body' }, 400);
   }
-  console.error(`[echo-social-media] ${err.message}`);
+  console.error(JSON.stringify({ ts: new Date().toISOString(), level: 'error', service: 'echo-social-media', error: err.message, path: c.req.path }));
   return c.json({ error: 'Internal server error' }, 500);
 });
 
